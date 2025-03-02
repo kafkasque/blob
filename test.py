@@ -5,6 +5,8 @@ import numpy as np
 from ctypes import cast, POINTER
 from comtypes import CLSCTX_ALL
 from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
+import logging
+import collections
 
 # Initialize MediaPipe Hands
 mp_hands = mp.solutions.hands
@@ -26,60 +28,56 @@ volume_range = volume.GetVolumeRange()
 min_vol = volume_range[0]
 max_vol = volume_range[1]
 
-# Function to detect thumbs up gesture
-def is_thumbs_up(hand_landmarks):
-    thumb_tip = hand_landmarks.landmark[mp_hands.HandLandmark.THUMB_TIP]
-    index_tip = hand_landmarks.landmark[mp_hands.HandLandmark.INDEX_FINGER_TIP]
-    middle_tip = hand_landmarks.landmark[mp_hands.HandLandmark.MIDDLE_FINGER_TIP]
-    ring_tip = hand_landmarks.landmark[mp_hands.HandLandmark.RING_FINGER_TIP]
-    pinky_tip = hand_landmarks.landmark[mp_hands.HandLandmark.PINKY_TIP]
+# Initialize logging
+logging.basicConfig(filename='gesture_control.log', level=logging.INFO)
 
-    # Check if the thumb is above the other fingers
-    if (thumb_tip.y < index_tip.y and
-        thumb_tip.y < middle_tip.y and
-        thumb_tip.y < ring_tip.y and
-        thumb_tip.y < pinky_tip.y):
-        return True
-    return False
+# Initialize a deque to store hand positions for smooth mouse movement
+position_history = collections.deque(maxlen=5)
 
-# Function to detect pinch gesture
-def is_pinch(hand_landmarks):
-    thumb_tip = hand_landmarks.landmark[mp_hands.HandLandmark.THUMB_TIP]
-    index_tip = hand_landmarks.landmark[mp_hands.HandLandmark.INDEX_FINGER_TIP]
+# Function to calculate angle between three points
+def calculate_angle(a, b, c):
+    a = np.array(a)
+    b = np.array(b)
+    c = np.array(c)
 
-    # Check if the thumb and index finger are close
-    if abs(thumb_tip.x - index_tip.x) < 0.05 and abs(thumb_tip.y - index_tip.y) < 0.05:
-        return True
-    return False
+    ba = a - b
+    bc = c - b
 
-# Function to control volume based on hand position
-def control_volume(hand_landmarks):
-    thumb_tip = hand_landmarks.landmark[mp_hands.HandLandmark.THUMB_TIP]
-    index_tip = hand_landmarks.landmark[mp_hands.HandLandmark.INDEX_FINGER_TIP]
+    cosine_angle = np.dot(ba, bc) / (np.linalg.norm(ba) * np.linalg.norm(bc))
+    angle = np.arccos(cosine_angle)
 
-    # Calculate the distance between thumb and index finger
-    distance = ((thumb_tip.x - index_tip.x) ** 2 + (thumb_tip.y - index_tip.y) ** 2) ** 0.5
+    return np.degrees(angle)
 
-    # Map distance to volume level
-    vol_level = np.interp(distance, [0.0, 0.2], [min_vol, max_vol])
-    volume.SetMasterVolumeLevel(vol_level, None)
-
-# Function to control scrolling
-def control_scroll(hand_landmarks):
-    middle_tip = hand_landmarks.landmark[mp_hands.HandLandmark.MIDDLE_FINGER_TIP]
+# Function to detect wrist bend (click gesture)
+def is_wrist_bend(hand_landmarks):
     wrist = hand_landmarks.landmark[mp_hands.HandLandmark.WRIST]
+    index_mcp = hand_landmarks.landmark[mp_hands.HandLandmark.INDEX_FINGER_MCP]
+    index_tip = hand_landmarks.landmark[mp_hands.HandLandmark.INDEX_FINGER_TIP]
 
-    # Calculate vertical movement
-    if middle_tip.y < wrist.y - 0.1:  # Hand moved up
-        pyautogui.scroll(1)  # Scroll up
-    elif middle_tip.y > wrist.y + 0.1:  # Hand moved down
-        pyautogui.scroll(-1)  # Scroll down
+    angle = calculate_angle(
+        [wrist.x, wrist.y],
+        [index_mcp.x, index_mcp.y],
+        [index_tip.x, index_tip.y]
+    )
 
-# Function to simulate mouse click
-def simulate_click(hand_landmarks):
-    if is_pinch(hand_landmarks):
-        pyautogui.click()
-        print("Click!")
+    if angle < 120:  # Adjust threshold as needed
+        return True
+    return False
+
+# Function to smooth mouse movement
+def smooth_mouse_movement(hand_landmarks):
+    wrist = hand_landmarks.landmark[mp_hands.HandLandmark.WRIST]
+    current_x = wrist.x
+    current_y = wrist.y
+
+    position_history.append((current_x, current_y))
+    avg_x = sum(pos[0] for pos in position_history) / len(position_history)
+    avg_y = sum(pos[1] for pos in position_history) / len(position_history)
+
+    cursor_x = int(avg_x * screen_width)
+    cursor_y = int(avg_y * screen_height)
+
+    return cursor_x, cursor_y
 
 # Set up MediaPipe Hands
 with mp_hands.Hands(
@@ -107,29 +105,16 @@ with mp_hands.Hands(
                 # Draw landmarks and connections
                 mp_drawing.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
 
-                # Detect gestures and control actions
-                if is_thumbs_up(hand_landmarks):
-                    cv2.putText(frame, "Thumbs Up!", (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-                    print("Thumbs up detected!")
-
-                if is_pinch(hand_landmarks):
-                    cv2.putText(frame, "Pinch!", (50, 100), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
-                    print("Pinch detected!")
-
-                # Control volume, scroll, and click
-                control_volume(hand_landmarks)
-                control_scroll(hand_landmarks)
-                simulate_click(hand_landmarks)
-
-                # Move the mouse cursor based on hand position
-                palm_base = hand_landmarks.landmark[mp_hands.HandLandmark.WRIST]
-                cursor_x = int(palm_base.x * screen_width)
-                cursor_y = int(palm_base.y * screen_height)
+                # Smooth mouse movement
+                cursor_x, cursor_y = smooth_mouse_movement(hand_landmarks)
                 pyautogui.moveTo(cursor_x, cursor_y)
 
-                # Visual feedback for volume control
-                vol_level = volume.GetMasterVolumeLevel()
-                cv2.putText(frame, f"Volume: {int(np.interp(vol_level, [min_vol, max_vol], [0, 100]))}%", (50, 150), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2)
+                # Detect wrist bend (click gesture)
+                if is_wrist_bend(hand_landmarks):
+                    pyautogui.click()
+                    logging.info("Wrist bend detected! Click triggered.")
+                    cv2.putText(frame, "Click!", (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+
         # Display the frame
         cv2.imshow('Hand Tracking and Gesture Control', frame)
 
